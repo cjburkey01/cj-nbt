@@ -1,0 +1,31 @@
+# data file for the Fltk User Interface Designer (fluid)
+version 1.0400
+header_name {.h}
+code_name {.cxx}
+class UserInterface {open
+} {
+  Function {make_window()} {open
+  } {
+    Fl_Window main_ui_window {
+      label {cj-nbt} open
+      xywh {438 538 472 372} type Double size_range {345 221 0 0} visible
+    } {
+      Fl_Menu_Bar main_ui_menubar {open selected
+        xywh {0 0 475 25}
+      } {
+        Submenu {} {
+          label File open
+          xywh {0 0 100 20}
+        } {
+          MenuItem {} {
+            label Open
+            xywh {0 0 100 20} shortcut 0x4006f
+          }
+        }
+      }
+      Fl_Tree nbt_tag_tree {
+        xywh {0 25 475 345}
+      }
+    }
+  }
+}

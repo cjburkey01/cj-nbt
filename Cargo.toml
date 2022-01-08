@@ -4,6 +4,7 @@ description = "CJ's simple Minecraft NBT editor built with love in Rust :)"
 version = "0.1.0"
 edition = "2021"
 publish = false
+build = "build.rs"
 
 [dependencies]
 # GUI library
@@ -13,3 +14,6 @@ fltk = "1.2.26"
 serde = "1.0.133"
 # NBT support for serde
 fastnbt = "1.3.0"
+
+[build-dependencies]
+fl2rust = "0.4.16"
