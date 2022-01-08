@@ -1,0 +1,9 @@
+[package]
+name = "cj-nbt"
+description = ""
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = "1.0.133"
+fastnbt = "1.3.0"
