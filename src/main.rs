@@ -1,22 +1,22 @@
 //! cj-nbt Minecraft NBT editor
 
+mod nbt_util;
 mod ui;
 
-use byteorder::{BigEndian, ReadBytesExt};
-use flate2::read::GzDecoder;
 use fltk::app;
 use fltk::app::Sender;
 use fltk::dialog::{FileDialog, FileDialogOptions, FileDialogType};
+use fltk::frame::Frame;
 use fltk::menu::MenuBar;
 use fltk::prelude::*;
-use fltk::tree::Tree;
+use fltk::tree::{Tree, TreeConnectorStyle, TreeItemDrawMode, TreeSelect, TreeSort};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use ui::UserInterface;
 
 // Temporary lang handling :P
-const MENU_FILE_OPEN: &'static str = "File/Open";
-const TREE_EMPTY_LABEL: &'static str = "No file open";
+const MENU_FILE_OPEN: &str = "File/Open";
+const TREE_EMPTY_LABEL: &str = "No file open";
 
 /// Possible events to receive from the GUI
 #[derive(Debug, Copy, Clone)]
@@ -34,10 +34,17 @@ struct CJNbtApp {
     /// FLT event receiver.
     receiver: app::Receiver<CJNbtAppEvent>,
 
-    /// The current open file, or None if no file is open.
-    current_file: Option<PathBuf>,
-    /// The current root of the NBT data structure, if a file is open.
-    current_root: Option<nbt::Value>,
+    /// The current open NBT file, or None if no file is open.
+    current: Option<CurrentNbtFile>,
+}
+
+/// Information about the currently loaded NBT file.
+#[allow(dead_code)]
+struct CurrentNbtFile {
+    /// Path to the file, or None if the file doesn't have a path yet.
+    file_path: Option<PathBuf>,
+    /// The root NBT node.
+    current_root: nbt::Value,
 }
 
 impl CJNbtApp {
@@ -58,8 +65,7 @@ impl CJNbtApp {
             ui,
             receiver,
 
-            current_file: None,
-            current_root: None,
+            current: None,
         }
     }
 
@@ -71,6 +77,10 @@ impl CJNbtApp {
 
     fn init_main_ui_tree(mut tree: Tree) {
         tree.set_root_label(TREE_EMPTY_LABEL);
+        tree.set_connector_style(TreeConnectorStyle::Solid);
+        tree.set_item_draw_mode(TreeItemDrawMode::Default);
+        tree.set_select_mode(TreeSelect::Single);
+        tree.set_sort_order(TreeSort::Ascending);
     }
 
     /// Take control and start listening for events from our FLTK GUI.
@@ -80,18 +90,28 @@ impl CJNbtApp {
                 match msg {
                     // Try to load a new file into the editor
                     CJNbtAppEvent::OpenFile => {
+                        // Request a file from the user
                         if let Some(selected_path) = show_open_nbt_file_dialog() {
                             println!("parsing nbt");
+
+                            // Try to parse the selected file
                             match Self::parse_nbt_file(&selected_path) {
                                 Ok((name, root_node)) => {
                                     println!("successfully parsed NBT");
+
+                                    // Load the NBT data into the tree
                                     Self::load_nbt_root_into_tree(
                                         self.ui.nbt_tag_tree.clone(),
                                         &name,
                                         &root_node,
                                         true,
                                     );
-                                    self.current_root = Some(root_node);
+
+                                    // Update current open file in our app state
+                                    self.current = Some(CurrentNbtFile {
+                                        file_path: Some(selected_path),
+                                        current_root: root_node,
+                                    });
                                 }
                                 Err(e) => panic!("failed to parse nbt: {}", e),
                             }
@@ -105,7 +125,7 @@ impl CJNbtApp {
     fn parse_nbt_file(file_path: &Path) -> nbt::Result<(String, nbt::Value)> {
         let mut file = File::open(file_path)?;
         // Try to interpret it as a compressed NBT file
-        match Self::from_gzip_reader(&mut file) {
+        match nbt_util::from_gzip_reader(&mut file) {
             v @ Ok(_) => v,
             // If that fails, try to read it as if it weren't compressed.
             Err(err) => {
@@ -113,7 +133,7 @@ impl CJNbtApp {
                     "failed to read nbt file with gzip stream reader ({:?}), trying to read uncompressed.",
                     err
                 );
-                Self::from_reader(&mut file)
+                nbt_util::from_reader(&mut file)
             }
         }
     }
@@ -127,82 +147,48 @@ impl CJNbtApp {
     ) {
         if clear_tree {
             tree.clear();
+            tree.set_show_root(false);
         }
-        tree.add(current_level);
-        let _ = tree.close(current_level, false);
-        if let nbt::Value::Compound(map) = root {
-            map.iter().for_each(|(key, val)| {
+
+        // Create this node
+        if let Some(mut tree_item) = tree.add(current_level) {
+            // Create a frame for our custom label to override the tree location
+            let mut new_label_widget = Frame::default();
+            let key = &current_level[current_level.rfind('/').map(|v| v + 1).unwrap_or(0)..];
+            new_label_widget.set_label(&format!("{} ({})", key, &root.tag_name()[4..]));
+            let (lw, lh) = new_label_widget.measure_label();
+            new_label_widget.set_size(lw + 4, lh + 4);
+
+            tree_item.set_widget(&new_label_widget);
+            tree_item.close();
+        }
+
+        match root {
+            // Make compound tags expandable
+            nbt::Value::Compound(map) => map.iter().for_each(|(key, val)| {
                 Self::load_nbt_root_into_tree(
                     tree.clone(),
                     &format!("{}/{}", current_level, key),
                     val,
                     false,
                 );
-            });
-        }
-    }
+            }),
 
-    /// Extracts an `Blob` object from an `io::Read` source that is
-    /// compressed using the Gzip format.
-    fn from_gzip_reader<R>(src: &mut R) -> nbt::Result<(String, nbt::Value)>
-    where
-        R: std::io::Read,
-    {
-        // Reads the gzip header, and fails if it is incorrect.
-        let mut data = GzDecoder::new(src);
-        Self::from_reader(&mut data)
-    }
-
-    /// Ripped from [`nbt::blob::Blob::from_reader`]
-    #[inline]
-    fn from_reader<R>(src: &mut R) -> nbt::Result<(String, nbt::Value)>
-    where
-        R: std::io::Read,
-    {
-        // Try to read the first tag (should be a compound tag)
-        let tag = src.read_u8()?;
-        // We must at least consume this title
-        let title = match tag {
-            0x00 => "".to_string(),
-            _ => Self::read_bare_string(src)?,
-        };
-
-        // Although it would be possible to read NBT format files composed of
-        // arbitrary objects using the current API, by convention all files
-        // have a top-level Compound.
-        if tag != 0x0a {
-            return Err(nbt::Error::NoRootCompound);
-        }
-        let content = nbt::Value::from_reader(tag, src)?;
-        match content {
-            val @ nbt::Value::Compound(_) => Ok((title, val)),
-            _ => Err(nbt::Error::NoRootCompound),
-        }
-    }
-
-    /// Ripped from [`nbt::blob::Blob::from_reader`]
-    #[inline]
-    fn read_bare_string<R>(src: &mut R) -> nbt::Result<String>
-    where
-        R: std::io::Read,
-    {
-        let len = src.read_u16::<BigEndian>()? as usize;
-
-        if len == 0 {
-            return Ok("".to_string());
-        }
-
-        let mut bytes = vec![0; len];
-        let mut n_read = 0usize;
-        while n_read < bytes.len() {
-            match src.read(&mut bytes[n_read..])? {
-                0 => return Err(nbt::Error::IncompleteNbtValue),
-                n => n_read += n,
+            // Make arbitrary tag lists expandable
+            nbt::Value::List(values) => {
+                values.iter().enumerate().for_each(|(i, val)| {
+                    Self::load_nbt_root_into_tree(
+                        tree.clone(),
+                        &format!("{}/{}", current_level, i),
+                        val,
+                        false,
+                    );
+                });
             }
-        }
 
-        let decoded = cesu8::from_java_cesu8(&bytes)?;
-        Ok(decoded.into_owned())
+            // Nothing else should expand (arrays can be edited with the array edit)
+            _ => {}
+        }
     }
 }
 
